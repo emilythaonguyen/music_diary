@@ -21,7 +21,7 @@ DB_CONFIG = {
     'port': os.getenv('DB_PORT', '5432')
 }
 
-# ---------------- Utilities ----------------
+# ---------------- utilities ----------------
 def clean_artist_name(name: str) -> str:
     if not name:
         return ""
@@ -96,7 +96,7 @@ def insert_listen(cursor, listen, artist_id, release_id, track_id):
         (listened_at, track_id, release_id, artist_id)
     )
 
-# ---------------- Fetch listens ----------------
+# ---------------- fetch listens ----------------
 def fetch_listens(username, last_ts=None):
     """
     Fetch new listens from ListenBrainz for a user.
@@ -145,7 +145,7 @@ def fetch_listens(username, last_ts=None):
 
     return all_listens
 
-# ---------------- Main ----------------
+# ---------------- main ----------------
 def main():
     conn = psycopg2.connect(**DB_CONFIG)
     cursor = conn.cursor()

@@ -16,7 +16,7 @@ import json
 load_dotenv()
 
 # -----------------------------
-# Config
+# config
 # -----------------------------
 SPOTIFY_CLIENT_IDS = os.getenv("SPOTIFY_CLIENT_IDS", "").split(",")
 SPOTIFY_CLIENT_SECRETS = os.getenv("SPOTIFY_CLIENT_SECRETS", "").split(",")
@@ -43,7 +43,7 @@ TRACK_BATCH_SIZE = 20
 REQUEST_DELAY = 0.5  # seconds between requests
 
 # -----------------------------
-# Global State
+# global state
 # -----------------------------
 client_cycle = cycle(zip(SPOTIFY_CLIENT_IDS, SPOTIFY_CLIENT_SECRETS))
 SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET = next(client_cycle)
@@ -55,24 +55,24 @@ artist_albums_cache = {}
 album_tracks_cache = {}
 
 # -----------------------------
-# Utility Functions
+# utility functions
 # -----------------------------
 def log_error(entity_type, entity_id, name, error_msg):
     with open("spotify_update_errors.csv", "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([entity_type, entity_id, name, error_msg])
-    print(f"❌ {entity_type} '{name}': {error_msg}")
+    print(f"❗️ {entity_type} '{name}': {error_msg}")
 
 def normalize_title(title, aggressive=False):
     if not title:
         return ""
     title = title.lower().strip()
     if aggressive:
-        # Remove brackets and their contents: (Official), [Deluxe], {Live}, etc.
+        # remove brackets and their contents: (official), [deluxe], {live}, etc.
         title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title)
-        # Remove punctuation
+        # remove punctuation
         title = re.sub(r"[^\w\s]", "", title)
-        # Normalize whitespace
+        # normalize whitespace
         title = re.sub(r"\s+", " ", title)
     return title
 
@@ -96,7 +96,7 @@ def load_cache(filename):
     return {}
 
 # -----------------------------
-# Spotify Auth & Rotation
+# spotify auth & rotation
 # -----------------------------
 async def get_spotify_token(session):
     global token_data, token_expires, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
@@ -120,13 +120,13 @@ def rotate_credentials():
             SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET = cid, secret
             token_data = None
             token_expires = 0
-            print(f"🔁 Rotated to available Spotify app -> {SPOTIFY_CLIENT_ID[:8]}...")
+            print(f"Rotated to available Spotify app -> {SPOTIFY_CLIENT_ID[:8]}...")
             return True
     return False
 
 async def handle_retry_after(retry_after):
     global blocked_until
-    print(f"⏸️ Global cooldown {retry_after//60} min detected for {SPOTIFY_CLIENT_ID[:8]}...")
+    print(f"❗️ Global cooldown {retry_after//60} min detected for {SPOTIFY_CLIENT_ID[:8]}...")
     blocked_until[SPOTIFY_CLIENT_ID] = time.time() + retry_after
     rotated = rotate_credentials()
     if rotated:
@@ -137,7 +137,7 @@ async def handle_retry_after(retry_after):
         await asyncio.sleep(wait_time + 1)
 
 # -----------------------------
-# Safe Spotify Request
+# safe spotify request
 # -----------------------------
 safe_spotify_request_semaphore = asyncio.Semaphore(RATE_LIMIT)
 
@@ -162,16 +162,16 @@ async def safe_spotify_request(session, endpoint, params=None):
                         backoff = min(backoff * 2, 60)
                     elif resp.status == 400:
                         text = await resp.text()
-                        print(f"⚠️ Spotify API error 400: {text}")
+                        print(f"❗️ Spotify API error 400: {text}")
                         return None
                     elif resp.status != 200:
                         text = await resp.text()
-                        print(f"⚠️ Spotify API error {resp.status}: {text}")
+                        print(f"❗️ Spotify API error {resp.status}: {text}")
                         return None
                     else:
                         return await resp.json()
             except Exception as e:
-                print(f"⚠️ Request error: {e}. Retrying in {backoff}s...")
+                print(f"❗️ Request error: {e}. Retrying in {backoff}s...")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
             retries += 1
@@ -179,7 +179,7 @@ async def safe_spotify_request(session, endpoint, params=None):
         return None
 
 # -----------------------------
-# Spotify Helpers
+# spotify helpers
 # -----------------------------
 async def search_artist(session, name, limit=10):
     """
@@ -216,7 +216,7 @@ async def fetch_album_tracks(session, album_id):
     return tracks
 
 # -----------------------------
-# Fuzzy Matching
+# fuzzy matching
 # -----------------------------
 def fuzzy_match_artist(db_name, spotify_artists):
     """
@@ -257,7 +257,7 @@ def fuzzy_match_release(db_title, spotify_albums):
     return None
 
 def fuzzy_match_track(db_title, spotify_tracks):
-    db_norm = normalize_title(db_title, aggressive=True)  # ❌ for_track no longer exists
+    db_norm = normalize_title(db_title, aggressive=True)  # for_track no longer exists
     best = None
     best_score = 0
     for a in spotify_tracks:
@@ -275,7 +275,7 @@ def fuzzy_match_track(db_title, spotify_tracks):
 
 
 # -----------------------------
-# Throttled Fetching
+# throttled fetching
 # -----------------------------
 async def fetch_artist_albums_safe(session, artists_with_spotify):
     """
@@ -316,7 +316,7 @@ async def fetch_album_tracks_safe(session, releases_with_spotify):
     save_cache(TRACK_CACHE_FILE, album_tracks_cache)
 
 # -----------------------------
-# Main Async Logic
+# main async logic
 # -----------------------------
 async def main():
     global artist_albums_cache, album_tracks_cache
@@ -349,7 +349,7 @@ async def main():
                     "UPDATE artists SET spotify_id=$1 WHERE artist_id=$2",
                     spotify_id, artist["artist_id"]
                 )
-                print(f"✅ {artist['artist_name']} → Spotify ID {spotify_id}")
+                print(f"🟢 {artist['artist_name']} → Spotify ID {spotify_id}")
                 artist_success += 1
             else:
                 log_error(
@@ -361,7 +361,7 @@ async def main():
                 artist_fail += 1
 
         await tqdm_asyncio.gather(*[update_artist(a) for a in artists_missing], desc="Artists")
-        print(f"✅ Artists updated: {artist_success}, ❌ Unmatched: {artist_fail}")
+        print(f"🟢 Artists updated: {artist_success}, 🔴 Unmatched: {artist_fail}")
 
         # --- ALBUMS ---
         artists_with_spotify = await pool.fetch("SELECT artist_id, spotify_id FROM artists WHERE spotify_id IS NOT NULL;")
@@ -384,7 +384,7 @@ async def main():
                     continue
             log_error("release", release["release_id"], release["release_name"], "No match found")
             release_fail += 1
-        print(f"✅ Releases updated: {release_success}, ❌ Unmatched: {release_fail}")
+        print(f"🟢 Releases updated: {release_success}, 🔴 Unmatched: {release_fail}")
 
         # --- TRACKS ---
         releases_with_spotify = await pool.fetch("SELECT release_id, spotify_id FROM releases WHERE spotify_id IS NOT NULL;")
@@ -409,10 +409,10 @@ async def main():
             else:
                 log_error("track", track["track_id"], track["track_name"], "No match found")
                 track_fail += 1
-        print(f"✅ Tracks updated: {track_success}, ❌ Unmatched: {track_fail}")
+        print(f"🟢 Tracks updated: {track_success}, 🔴 Unmatched: {track_fail}")
 
     await pool.close()
-    print("🎉 Async Spotify update completed with throttling, caching, and safe credential rotation!")
+    print("🐸 Spotify update completed!")
 
 # -----------------------------
 # Run
