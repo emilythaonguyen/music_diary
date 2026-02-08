@@ -16,3 +16,8 @@ album_tracks_cache.json
 artist_albums_cache.json
 last_max_ts.txt
 spotify_update_errors.csv
+release_mismatches.csv
+
+**/old_code/
+
+spotify_cache.db
