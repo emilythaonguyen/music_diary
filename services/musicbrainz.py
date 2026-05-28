@@ -3,7 +3,7 @@ MusicBrainz API client with rate limiting and retry logic.
 """
 import asyncio
 import functools
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 
 import musicbrainzngs
 
@@ -30,7 +30,7 @@ class MusicBrainzClient:
         func: callable,
         *args,
         retries: int = 5,
-        delay: float = 1.0,
+        delay: float = 1.2,
         **kwargs
     ) -> Optional[Dict]:
         """
@@ -227,6 +227,44 @@ class MusicBrainzClient:
         
         if result and "recording" in result:
             return result["recording"]
+        return None
+
+    async def get_artist_by_id(
+        self,
+        mbid: str,
+        inlcudes: Optional[List[str]] = None
+    ) -> Optional[Dict]:
+        """
+        Get artist details by mbid to fetch isnis and aliases.
+        """
+        includes = includes or ['isnis', 'aliases']
+        result = await self._self_call(
+            musicbrainzngs.get_artist_by_id,
+            mbid,
+            includes=includes
+        )
+        
+        await asyncio.sleep(MusicBrainzConfig.RATE_LIMIT_DELAY)
+        
+        if result and "artist" in result:
+            return result["artist"]
+        return None
+    
+    async def get_release_by_id(
+        self,
+        mbid: str
+    ) -> Optional[Dict]:
+        """
+        Fetch release details to get the barcode (UPC/EAN)
+        """
+        result = await self._safe_call(
+            musicbrainzngs.get_release_by_id,
+            mbid
+        )
+        
+        if result and "release" in result:
+            return result["result"]
+        
         return None
     
     @staticmethod

@@ -23,14 +23,17 @@ def normalize_text(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
-def clean_artist_name(name: str) -> str:
-    """Remove featuring tags and normalize whitespace."""
+def clean_artist_name(name: str, mbid: str = None) -> str:
+    """Remove featuring tags and comma-splits based on MBID presencce."""
     if not name:
         return ""
-    # remove everything after feat/ft
-    name = re.split(r'\b(feat\.?|ft\.?)\b', name, flags=re.IGNORECASE)[0]
+    
+    # Only split on comma if we don't have an MBID to trust
+    if mbid:
+        name = re.split(r'\b(feat\.?|ft\.?)\b', name, flags=re.IGNORECASE)[0]
+    else:
+        name = re.split(r'\b(feat\.?|ft\.?)\b|,', name, flags=re.IGNORECASE)[0]
     return normalize_text(name)
-
 
 def normalize_name(name: str) -> str:
     """
@@ -223,3 +226,26 @@ def compute_fuzzy_score(db_norm: str, db_romaji: str, candidate: str) -> float:
         fuzz.ratio(db_romaji, cand_romaji)
     ]
     return max(scores) / 100
+
+def extract_spotify_id(value: str) -> str:
+    """Extract bare Spotify track ID from URL, URI, or proxy strings"""
+    if not value or not isinstance(value, str):
+        return None
+    
+    # remove query strings and split by common delimiters
+    value = value.split('?')[0]
+    parts = [p for p in re.split(r'[/:]', value) if p]
+    
+    if not parts:
+        return None
+
+    potential_id = parts[-1].strip()
+    
+    # validation must match the DB constraint exactly
+    if len(potential_id) == 22 and potential_id.isalnum():
+        return potential_id
+        
+    return None
+
+
+    

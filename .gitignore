@@ -22,3 +22,5 @@ release_mismatches.csv
 **/old_code/
 
 spotify_cache.db
+
+**/spotify_data/

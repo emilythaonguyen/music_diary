@@ -18,6 +18,7 @@ from core.config import (
 from services.musicbrainz import MusicBrainzClient
 from services.spotify import SpotifyClient
 from utils.database import check_metadata_refresh, parse_mb_date, chunked
+from utils.music_logic import link_contributing_artists
 
 
 class MetadataFetcher:
@@ -40,7 +41,6 @@ class MetadataFetcher:
     
     async def update_artist_from_mb(
         self,
-        session: aiohttp.ClientSession,
         artist_id: int,
         artist_mbid: str,
         force: bool = False
@@ -52,6 +52,7 @@ class MetadataFetcher:
             session: aiohttp session
             artist_id: Local artist ID
             artist_mbid: MusicBrainz artist ID
+            force: Boolean to bypass checking to refresh
         """
         # check if refresh needed
         if not force and not await check_metadata_refresh(
@@ -113,7 +114,6 @@ class MetadataFetcher:
     
     async def update_release_from_mb(
         self,
-        session: aiohttp.ClientSession,
         release_id: int,
         release_mbid: str,
         release_group_mbid: str,
@@ -152,28 +152,36 @@ class MetadataFetcher:
         if not rg_data or not release_data:
             return
         
+        # extract all artists credited on release
+        artist_map = self._extract_artist_map(release_data)
+        
         async with self.pool.acquire() as conn:
-            # update release info
-            await conn.execute(
-                """
-                UPDATE releases 
-                SET release_type = $1,
-                    release_date = $2,
-                    country = $3,
-                    retrieved_at = CURRENT_TIMESTAMP
-                WHERE release_id = $4
-                """,
-                rg_data.get("primary-type"),
-                parse_mb_date(release_data.get("date")),
-                release_data.get("country"),
-                release_id
-            )
-    
+            async with conn.transaction():
+                # update release info
+                await conn.execute(
+                    """
+                    UPDATE releases 
+                    SET release_type = $1,
+                        release_date = $2,
+                        country = $3,
+                        retrieved_at = CURRENT_TIMESTAMP
+                    WHERE release_id = $4
+                    """,
+                    rg_data.get("primary-type"),
+                    parse_mb_date(release_data.get("date")),
+                    release_data.get("country"),
+                    release_id
+                )
+                
+                # link all contributing artists
+                if artist_map:
+                    await link_contributing_artists(conn, release_id, artist_map, mode='release')
+                    
     async def update_track_from_mb(
         self,
-        session: aiohttp.ClientSession,
         track_id: int,
-        recording_mbid: str
+        recording_mbid: str,
+        force: bool = False
     ) -> None:
         """
         Fetch and update track metadata from MusicBrainz.
@@ -184,7 +192,7 @@ class MetadataFetcher:
             recording_mbid: MusicBrainz recording ID
         """
         # check if refresh needed
-        if not await check_metadata_refresh(
+        if not force and not await check_metadata_refresh(
             self.pool,
             "tracks",
             "track_id",
@@ -198,24 +206,35 @@ class MetadataFetcher:
             recording_mbid,
             includes=["artist-credits"]
         )
-        
         if not recording:
             return
         
         async with self.pool.acquire() as conn:
-            # update track info
-            length_ms = recording.get("length")
+            # extract artist credits into map format
+            artist_credits = recording.get("artist-credit", [])
+            artist_map = {
+                credit['artist']['id']: credit['artist']['name']
+                for credit in artist_credits
+                if 'artist' in credit
+            }
             
-            await conn.execute(
-                """
-                UPDATE tracks 
-                SET duration_ms = $1,
-                    retrieved_at = CURRENT_TIMESTAMP
-                WHERE track_id = $2
-                """,
-                int(length_ms) if length_ms else None,
-                track_id
-            )
+            async with conn.transaction():
+                # update track info
+                length_ms = recording.get("length")
+                
+                await conn.execute(
+                    """
+                    UPDATE tracks 
+                    SET duration_ms = $1,
+                        retrieved_at = CURRENT_TIMESTAMP
+                    WHERE track_id = $2
+                    """,
+                    int(length_ms) if length_ms else None,
+                    track_id
+                )
+                
+                # link track_artists
+                await link_contributing_artists(conn, track_id, artist_map, mode='track')
     
     # ========================================
     # spotify Metadata
@@ -395,7 +414,7 @@ class MetadataFetcher:
     
     async def fetch_musicbrainz_metadata(
         self,
-        session: aiohttp.ClientSession
+        force: bool = False
     ) -> None:
         """Fetch all MusicBrainz metadata."""
         print("\n📊 Fetching MusicBrainz metadata...")
@@ -412,9 +431,9 @@ class MetadataFetcher:
         print(f"  Artists: {len(artists)}")
         for artist in tqdm(artists, desc="MB Artists"):
             await self.update_artist_from_mb(
-                session,
                 artist["artist_id"],
-                artist["artist_mbid"]
+                artist["artist_mbid"], 
+                force=force
             )
             await asyncio.sleep(MusicBrainzConfig.REQUEST_DELAY)
         
@@ -425,17 +444,16 @@ class MetadataFetcher:
             FROM releases 
             WHERE on_mb IS TRUE 
               AND release_mbid IS NOT NULL
-              AND release_group_mbid IS NOT NULL
             """
         )
         
         print(f"  Releases: {len(releases)}")
         for release in tqdm(releases, desc="MB Releases"):
             await self.update_release_from_mb(
-                session,
                 release["release_id"],
                 release["release_mbid"],
-                release["release_group_mbid"]
+                release["release_group_mbid"],
+                force=force
             )
             await asyncio.sleep(MusicBrainzConfig.REQUEST_DELAY)
         
@@ -451,9 +469,9 @@ class MetadataFetcher:
         print(f"  Tracks: {len(tracks)}")
         for track in tqdm(tracks, desc="MB Tracks"):
             await self.update_track_from_mb(
-                session,
                 track["track_id"],
-                track["recording_mbid"]
+                track["recording_mbid"],
+                force=force
             )
             await asyncio.sleep(MusicBrainzConfig.REQUEST_DELAY)
     
@@ -463,6 +481,19 @@ class MetadataFetcher:
     ) -> None:
         """Fetch all Spotify metadata."""
         print("\n📊 Fetching Spotify metadata...")
+        
+        isrc_tracks = await self.pool.fetch(
+            "SELECT track_id, isrc FROM tracks WHERE spotify_id IS NULL AND isrc IS NOT NULL"
+        )
+        
+        for row in tqdm(isrc_tracks, desc="Searching Spotify by ISRC"):
+            sp_track = await self.spotify.search_track_by_isrc(session, row['isrc'])
+            if sp_track:
+                await self.pool.execute(
+                    "UPDATE tracks SET spotify_id = $1, on_spotify = TRUE WHERE track_id = $2",
+                    sp_track['id'], row['track_id']
+                )
+            await asyncio.sleep(SpotifyConfig.REQUEST_DELAY)
         
         # tracks
         tracks = await self.pool.fetch(
@@ -507,24 +538,24 @@ class MetadataFetcher:
             spotify_ids = [a["spotify_id"] for a in artists]
             await self.update_artists_from_spotify(session, spotify_ids)
     
-    async def run(self, session: aiohttp.ClientSession) -> None:
+    async def run(self, session: aiohttp.ClientSession, force: bool = False) -> None:
         """Run complete metadata fetching process."""
         print("🎵 Starting metadata fetch...")
         
-        await self.fetch_musicbrainz_metadata(session)
+        await self.fetch_musicbrainz_metadata(force=force)
         await self.fetch_spotify_metadata(session)
         
         print("\n✅ Metadata fetch completed!")
 
 
-async def main():
+async def main(force: bool = False):
     """Entry point for metadata fetching."""
     pool = await asyncpg.create_pool(**DatabaseConfig.as_dict())
     
     try:
         fetcher = MetadataFetcher(pool)
         async with aiohttp.ClientSession() as session:
-            await fetcher.run(session)
+            await fetcher.run(session, force=force)
     finally:
         await pool.close()
 

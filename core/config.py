@@ -13,7 +13,7 @@ class DatabaseConfig:
     USER = os.getenv("DB_USER", "emilynguyen")
     PASSWORD = os.getenv("DB_PASSWORD")
     HOST = os.getenv("DB_HOST", "localhost")
-    PORT = os.getenv("DB_PORT", "5432")
+    PORT = os.getenv("DB_PORT", "5433")
     
     @classmethod
     def as_dict(cls):
@@ -23,7 +23,7 @@ class DatabaseConfig:
             "user": cls.USER,
             "password": cls.PASSWORD,
             "host": cls.HOST,
-            "port": cls.PORT,
+            "port": int(cls.PORT),
         }
     
     @classmethod
@@ -55,7 +55,7 @@ class MusicBrainzConfig:
     """MusicBrainz API configuration."""
     USER_AGENT = os.getenv("MB_USER_AGENT")
     BASE_URL = "https://musicbrainz.org/ws/2"
-    RATE_LIMIT_DELAY = 1.1
+    RATE_LIMIT_DELAY = 1.5
     REQUEST_DELAY = 0.3
     RETRY_LIMIT = 5
 
@@ -68,6 +68,11 @@ class ListenBrainzConfig:
     THROTTLE = 1.0
     COMMIT_INTERVAL = 100
 
+class LastFMConfig:
+    """Last.fm API configuration."""
+    USER_AGENT = os.getenv("LASTFM_USER")
+    BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+    API_KEY = os.getenv("LASTFM_API_KEY")
 
 class WikidataConfig:
     """Wikidata API configuration."""

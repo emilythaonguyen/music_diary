@@ -1,0 +1,34 @@
+
+services:
+  # The Database Service
+  db:
+    image: postgres:15-alpine
+    container_name: music_diary_db
+    restart: always
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # The Python Application Service
+  app:
+    build: .
+    container_name: music_diary_app
+    depends_on:
+      - db
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    tty: true
+    stdin_open: true
+    environment:
+      - PYTHONPATH=/app
+      - DB_HOST=db
+
+volumes:
+  postgres_data:

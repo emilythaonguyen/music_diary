@@ -31,7 +31,8 @@ Commands:
     fetch-metadata      Fetch metadata from MusicBrainz and Spotify
     validate-musicbrainz Validate MusicBrainz matches
     validate-spotify    Validate Spotify matches
-
+    
+    
 Examples:
     python cli.py import
     python cli.py match-musicbrainz
@@ -65,8 +66,9 @@ async def run_match_spotify():
 async def run_fetch_metadata():
     """Fetch metadata from APIs."""
     from scripts.fetch_metadata import main
-    await main()
-
+    # Check if --force or -f is in the command line arguments
+    force = "--force" in sys.argv or "-f" in sys.argv
+    await main(force=force)
 
 async def run_validate_musicbrainz():
     """Validate MusicBrainz matches."""
@@ -78,7 +80,7 @@ async def run_validate_spotify():
     """Validate Spotify matches."""
     from scripts.validate_spotify import main
     await main()
-
+    
 
 def main():
     """Main CLI entry point."""

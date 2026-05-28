@@ -226,3 +226,33 @@ class SpotifyClient:
             params = None  # params included in next URL
         
         return all_items
+    
+    async def get_artist(self, session: aiohttp.ClientSession, artist_id: str) -> Optional[Dict]:
+        """Fetch a single artist by ID."""
+        return await self.request(session, f"/artists/{artist_id}")
+    
+    async def search_track_by_isrc(self, session: aiohttp.ClientSession, isrc: str) -> Optional[Dict]:
+        """
+        Find a track using its ISRC
+        """
+        result = await self.request(
+            session,
+            "/search",
+            params={
+                "q": f"isrc:{isrc}",
+                "type": "track",
+                "limit": 1
+            }
+        )
+        
+        tracks = result.get("tracks", {}).get("items", [])
+        return tracks[0] if tracks else None
+        
+    async def search_album_by_upc(self, session: aiohttp.ClientSession, upc: str):
+        """Fiand an album using its UPC/EAN barcode."""
+        result = await self.request(
+            session, "/search",
+            params={"q": f"upc:{upc}", "type": "album", "limit": 1}
+        )
+        albums = result.get("albums", {}).get("items", [])
+        return albums[0] if albums else None

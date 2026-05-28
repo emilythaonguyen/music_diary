@@ -1,6 +1,7 @@
 """
 Validate Spotify matches by checking if artist/album/track names match.
 Generates CSV reports of mismatches for manual review.
+NOW WITH UPC VALIDATION FOR RELEASES AND ISNI VALIDATION FOR ARTISTS.
 """
 import asyncio
 import csv
@@ -17,7 +18,7 @@ from services.musicbrainz import MusicBrainzClient
 
 
 class SpotifyValidator:
-    """Validate Spotify matches."""
+    """Validate Spotify matches with UPC/ISNI priority."""
     
     def __init__(self, pool: asyncpg.Pool, output_file: str = "spotify_mismatches.csv"):
         """
@@ -72,10 +73,18 @@ class SpotifyValidator:
         )
         return [r["alias_name"] for r in rows]
     
+    async def get_artist_releases(self, artist_id: int) -> List[str]:
+        """Get release names for an artist."""
+        rows = await self.pool.fetch(
+            "SELECT release_name FROM releases WHERE primary_artist_id = $1 LIMIT 10",
+            artist_id
+        )
+        return [r["release_name"] for r in rows]
+    
     async def validate_artists(self, session: aiohttp.ClientSession) -> int:
         """
-        Validate all artist matches using Spotify name matching and
-        MusicBrainz official URL relationships.
+        Validate all artist matches using Spotify name matching,
+        MusicBrainz official URL relationships, and ISNI validation.
         
         Args:
             session: aiohttp session
@@ -85,13 +94,13 @@ class SpotifyValidator:
         """
         artists = await self.pool.fetch(
             """
-            SELECT artist_id, artist_name, sort_name, artist_type, spotify_id, artist_mbid
+            SELECT artist_id, artist_name, sort_name, artist_type, spotify_id, artist_mbid, isni
             FROM artists
             WHERE spotify_id IS NOT NULL AND on_spotify IS TRUE
             """
         )
         
-        print(f"\n🔍 Validating {len(artists)} artists...")
+        print(f"\n🔍 Validating {len(artists)} artists (with ISNI validation)...")
         mismatches = 0
         
         for artist in artists:
@@ -99,6 +108,7 @@ class SpotifyValidator:
             artist_mbid = artist["artist_mbid"]
             artist_id = artist["artist_id"]
             db_name = artist["artist_name"]
+            db_isni = artist.get("isni")
                             
             if not isinstance(spotify_id, str) or len(spotify_id) != 22:
                 self.log_mismatch(
@@ -143,9 +153,6 @@ class SpotifyValidator:
                 except Exception as e:
                     print(f"  ⚠️ Skipping MB check for {db_name}: {e}")
             
-            else:
-                pass
-            
             # fetch from spotify
             spotify_artist = await self.spotify.request(
                 session,
@@ -177,17 +184,45 @@ class SpotifyValidator:
                 mismatches += 1
                 continue
             
+            # PRIORITY: Validate ISNI if both have it
+            spotify_isni = spotify_artist.get("external_ids", {}).get("isni")
+            if db_isni and spotify_isni:
+                if db_isni != spotify_isni:
+                    self.log_mismatch(
+                        "artist",
+                        artist_id,
+                        db_name,
+                        f"ISNI mismatch: DB={db_isni}, Spotify={spotify_isni}",
+                        0.0,
+                        "isni_mismatch"
+                    )
+                    mismatches += 1
+                    
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE artists SET spotify_id = NULL, on_spotify = NULL WHERE artist_id = $1",
+                            artist["artist_id"]
+                        )
+                    print(f"  → Nulled Spotify ID (ISNI mismatch)")
+                    continue
+                else:
+                    # ISNI matches - this is definitive, skip name validation
+                    print(f"✅ ISNI match confirmed for '{db_name}'")
+                    continue
+            
             # get aliases
             aliases = await self.get_artist_aliases(artist["artist_id"])
             
             if db_name.lower() == spotify_name.lower():
                 continue
             
-            # validate match
+            # validate match (with ISNI passed for logging)
             is_valid, score = self.matcher.validate_artist_match(
                 db_name,
                 spotify_name,
-                aliases
+                aliases,
+                db_isni=db_isni,
+                spotify_isni=spotify_isni
             )
             
             if is_valid:
@@ -231,7 +266,7 @@ class SpotifyValidator:
     
     async def validate_albums(self, session: aiohttp.ClientSession) -> int:
         """
-        Validate all album matches.
+        Validate all album matches with UPC validation priority.
         
         Args:
             session: aiohttp session
@@ -241,15 +276,15 @@ class SpotifyValidator:
         """
         releases = await self.pool.fetch(
             """
-            SELECT r.release_id, r.release_name, r.spotify_id, r.release_mbid,
+            SELECT r.release_id, r.release_name, r.spotify_id, r.release_mbid, r.upc,
                     a.spotify_id AS artist_spotify_id
-            FROM releases
+            FROM releases r
             JOIN artists a ON r.primary_artist_id = a.artist_id
             WHERE r.spotify_id IS NOT NULL AND r.on_spotify IS TRUE
             """
         )
         
-        print(f"\n🔍 Validating {len(releases)} albums...")
+        print(f"\n🔍 Validating {len(releases)} albums (with UPC validation)...")
         mismatches = 0
         
         for release in releases:
@@ -259,6 +294,7 @@ class SpotifyValidator:
             release_id = release["release_id"]
             release_mbid = release["release_mbid"]
             primary_artist_spid = release['artist_spotify_id']
+            db_upc = release.get("upc")
             
             if not isinstance(spotify_id, str) or len(spotify_id) != 22:
                 self.log_mismatch(
@@ -280,7 +316,7 @@ class SpotifyValidator:
                         official_ids = self.mb_client.extract_spotify_id(mb_release.get("url-relation-list", []))
                         if official_ids and spotify_id not in official_ids:
                             self.log_mismatch(
-                                "artist", 
+                                "album", 
                                 release_id, 
                                 db_title, 
                                 f"DB: {spotify_id} | MB Official: {official_ids}", 
@@ -299,9 +335,6 @@ class SpotifyValidator:
                         
                 except Exception as e:
                     print(f"  ⚠️ Skipping MB check for {db_title}: {e}")
-                    
-            else:
-                pass
                         
             # fetch from spotify
             spotify_album = await self.spotify.request(
@@ -334,6 +367,36 @@ class SpotifyValidator:
                 mismatches += 1
                 continue
             
+            # PRIORITY: Validate UPC if both have it
+            spotify_upc = spotify_album.get("external_ids", {}).get("upc")
+            if db_upc and spotify_upc:
+                # Clean both UPCs for comparison
+                clean_db_upc = db_upc.replace("-", "").replace(" ", "")
+                clean_spotify_upc = spotify_upc.replace("-", "").replace(" ", "")
+                
+                if clean_db_upc != clean_spotify_upc:
+                    self.log_mismatch(
+                        "album",
+                        release_id,
+                        db_title,
+                        f"UPC mismatch: DB={db_upc}, Spotify={spotify_upc}",
+                        0.0,
+                        "upc_mismatch"
+                    )
+                    mismatches += 1
+                    
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE releases SET spotify_id = NULL, on_spotify = NULL WHERE release_id = $1",
+                            release_id
+                        )
+                    print(f"  → Nulled Spotify ID (UPC mismatch)")
+                    continue
+                else:
+                    # UPC matches - this is definitive, skip name validation
+                    print(f"✅ UPC match confirmed for '{db_title}'")
+                    continue
+            
             # primary artist check
             sp_artist_id = spotify_album['artists'][0]['id']
             if sp_artist_id != primary_artist_spid:
@@ -349,19 +412,21 @@ class SpotifyValidator:
             
                 async with self.pool.acquire() as conn:
                     await conn.execute(
-                        "UPDATE releasess SET spotify_id = NULL, on_spotify = NULL WHERE release_id = $1", 
+                        "UPDATE releases SET spotify_id = NULL, on_spotify = NULL WHERE release_id = $1", 
                         release_id
                     )
                 print(f"  → Nulled Spotify ID (Primary Artist Mismatch)")
                 continue
             
-            # validate match
+            # validate match (with UPC passed for logging)
             if spotify_name.lower() == db_title.lower():
                 continue
             
             is_valid, score = self.matcher.validate_release_match(
                 db_title,
-                spotify_name
+                spotify_name,
+                db_upc=db_upc,
+                spotify_upc=spotify_upc
             )
             
             if not is_valid:
@@ -390,7 +455,7 @@ class SpotifyValidator:
     
     async def validate_tracks(self, session: aiohttp.ClientSession) -> int:
         """
-        Validate all track matches.
+        Validate all track matches with ISRC validation priority.
         
         Args:
             session: aiohttp session
@@ -400,7 +465,7 @@ class SpotifyValidator:
         """
         tracks = await self.pool.fetch(
             """
-            SELECT t.track_id, t.track_name, t.spotify_id, 
+            SELECT t.track_id, t.track_name, t.spotify_id, t.isrc,
                    r.spotify_id AS release_spotify_id
             FROM tracks t
             JOIN releases r ON t.release_id = r.release_id
@@ -409,7 +474,7 @@ class SpotifyValidator:
             """
         )
         
-        print(f"\n🔍 Validating {len(tracks)} tracks (sample)...")
+        print(f"\n🔍 Validating {len(tracks)} tracks (sample, with ISRC validation)...")
         mismatches = 0
         
         # batch fetch for efficiency
@@ -429,6 +494,7 @@ class SpotifyValidator:
             
             for j, spotify_track in enumerate(result["tracks"]):
                 track = tracks[i + j]
+                db_isrc = track.get("isrc")
                 
                 if not spotify_track:
                     self.log_mismatch(
@@ -441,6 +507,31 @@ class SpotifyValidator:
                     )
                     mismatches += 1
                     continue
+                
+                # PRIORITY: Validate ISRC if both have it
+                spotify_isrc = spotify_track.get("external_ids", {}).get("isrc")
+                if db_isrc and spotify_isrc:
+                    if db_isrc != spotify_isrc:
+                        self.log_mismatch(
+                            "track",
+                            track["track_id"],
+                            track["track_name"],
+                            f"ISRC mismatch: DB={db_isrc}, Spotify={spotify_isrc}",
+                            0.0,
+                            "isrc_mismatch"
+                        )
+                        mismatches += 1
+                        
+                        await self.pool.execute(
+                            "UPDATE tracks SET spotify_id = NULL, on_spotify = NULL WHERE track_id = $1",
+                            track["track_id"]
+                        )
+                        print(f"  → Nulled Spotify ID (ISRC mismatch)")
+                        continue
+                    else:
+                        # ISRC matches - this is definitive, skip name validation
+                        print(f"✅ ISRC match confirmed for '{track['track_name']}'")
+                        continue
                 
                 # parent album check
                 album_spid = spotify_track.get("album", {}).get("id")
@@ -478,10 +569,12 @@ class SpotifyValidator:
                 if track["track_name"].lower() == spotify_name.lower():
                     continue
                 
-                # validate match
+                # validate match (with ISRC passed for logging)
                 is_valid, score = self.matcher.validate_track_match(
                     track["track_name"],
-                    spotify_name
+                    spotify_name,
+                    db_isrc=db_isrc,
+                    spotify_isrc=spotify_isrc
                 )
                 
                 if not is_valid:
@@ -523,7 +616,7 @@ class SpotifyValidator:
     
     async def run(self, session: aiohttp.ClientSession) -> None:
         """Run complete validation process."""
-        print("🔍 Starting Spotify validation...")
+        print("🔍 Starting Spotify validation (with UPC/ISNI/ISRC priority)...")
         
         artist_mismatches = await self.validate_artists(session)
         album_mismatches = await self.validate_albums(session)

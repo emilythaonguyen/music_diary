@@ -1,6 +1,7 @@
 """
 Match local entities to MusicBrainz database.
 Handles artists, releases, and tracks with fuzzy matching and duplicate merging.
+NOW WITH UPC PRIORITY FOR RELEASES AND ISNI PRIORITY FOR ARTISTS.
 """
 import asyncio
 from typing import Optional, List, Dict
@@ -31,7 +32,7 @@ FK_RELATIONSHIPS = {
 
 
 class MusicBrainzMatcher:
-    """Match local entities to MusicBrainz."""
+    """Match local entities to MusicBrainz with UPC/ISNI priority."""
     
     def __init__(self, pool: asyncpg.Pool):
         """
@@ -136,20 +137,62 @@ class MusicBrainzMatcher:
         self,
         artist_id: int,
         artist_name: str,
-        spotify_id: Optional[str] = None
+        spotify_id: Optional[str] = None,
+        isni: Optional[str] = None
     ) -> Optional[str]:
         """
-        Match artist to MusicBrainz.
+        Match artist to MusicBrainz with ISNI priority.
         
         Args:
             artist_id: Local artist ID
             artist_name: Artist name
             spotify_id: Spotify ID if available
+            isni: ISNI if available
         
         Returns:
             MusicBrainz ID if matched
         """
-        # search musicbrainz
+        # PRIORITY 1: Try direct ISNI search if available
+        if isni:
+            print(f"🔑 Artist has ISNI: {isni}")
+            isni_results = await self.mb.search_artists(f"isni:{isni}", limit=5)
+            
+            if isni_results:
+                # Take the first result as ISNI should be unique
+                candidate = isni_results[0]
+                mbid = candidate["id"]
+                
+                # Verify ISNI matches (get full details)
+                mb_detail = await self.mb.get_artist(mbid, includes=["url-rels"])
+                if mb_detail:
+                    # Check if ISNI is in the artist details
+                    mb_isni = mb_detail.get("isni-list")
+                    if mb_isni and isni in mb_isni:
+                        # Extract Spotify ID if available
+                        mb_spotify_id = self.mb.extract_spotify_id(
+                            mb_detail.get("url-relation-list", [])
+                        )
+                        
+                        # Fill missing spotify id
+                        if not spotify_id and mb_spotify_id:
+                            async with self.pool.acquire() as conn:
+                                await conn.execute(
+                                    "UPDATE artists SET spotify_id = $1 WHERE artist_id = $2",
+                                    mb_spotify_id,
+                                    artist_id
+                                )
+                        
+                        # Assign MBID
+                        final_id = await self.assign_mbid_with_merge(
+                            "artists",
+                            artist_id,
+                            mbid
+                        )
+                        
+                        print(f"✅ ISNI exact match: '{artist_name}' → MBID {mbid}")
+                        return mbid
+        
+        # PRIORITY 2: Search by name
         search_results = await self.mb.search_artists(artist_name, limit=25)
         
         if not search_results:
@@ -196,7 +239,7 @@ class MusicBrainzMatcher:
         if score >= ValidationConfig.ARTIST_THRESHOLD:
             mbid = best_candidate["id"]
             
-            # get full details to potentially extract Spotify id
+            # get full details to potentially extract Spotify id and ISNI
             mb_detail = await self.mb.get_artist(mbid, includes=["url-rels"])
             
             if mb_detail:
@@ -210,6 +253,17 @@ class MusicBrainzMatcher:
                         await conn.execute(
                             "UPDATE artists SET spotify_id = $1 WHERE artist_id = $2",
                             mb_spotify_id,
+                            artist_id
+                        )
+                
+                # fill missing ISNI
+                mb_isni_list = mb_detail.get("isni-list", [])
+                if not isni and mb_isni_list:
+                    mb_isni = mb_isni_list[0]  # Take first ISNI
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE artists SET isni = $1 WHERE artist_id = $2",
+                            mb_isni,
                             artist_id
                         )
                 
@@ -227,21 +281,82 @@ class MusicBrainzMatcher:
         release_id: int,
         release_name: str,
         artist_name: str,
-        spotify_id: Optional[str] = None
+        spotify_id: Optional[str] = None,
+        upc: Optional[str] = None
     ) -> Optional[str]:
         """
-        Match release to MusicBrainz.
+        Match release to MusicBrainz with UPC priority.
         
         Args:
             release_id: Local release ID
             release_name: Release name
             artist_name: Primary artist name
             spotify_id: Spotify ID if available
+            upc: UPC if available
         
         Returns:
             MusicBrainz ID if matched
         """
-        # search musicbrainz
+        # PRIORITY 1: Try direct UPC search if available
+        if upc:
+            print(f"🔑 Release has UPC: {upc}")
+            # Clean UPC (remove hyphens, spaces)
+            clean_upc = upc.replace("-", "").replace(" ", "")
+            upc_results = await self.mb.search_releases(
+                f"barcode:{clean_upc}",
+                limit=5
+            )
+            
+            if upc_results:
+                # Take the first result as UPC should be unique
+                candidate = upc_results[0]
+                mbid = candidate["id"]
+                
+                # Get full details
+                mb_detail = await self.mb.get_release(
+                    mbid,
+                    includes=["url-rels", "release-groups"]
+                )
+                
+                if mb_detail:
+                    # Verify UPC matches
+                    mb_barcode = mb_detail.get("barcode")
+                    if mb_barcode and mb_barcode == clean_upc:
+                        # Extract Spotify ID if available
+                        mb_spotify_id = self.mb.extract_spotify_id(
+                            mb_detail.get("url-relation-list", [])
+                        )
+                        
+                        # Fill missing spotify id
+                        if not spotify_id and mb_spotify_id:
+                            async with self.pool.acquire() as conn:
+                                await conn.execute(
+                                    "UPDATE releases SET spotify_id = $1 WHERE release_id = $2",
+                                    mb_spotify_id,
+                                    release_id
+                                )
+                        
+                        # Assign MBID
+                        final_id = await self.assign_mbid_with_merge(
+                            "releases",
+                            release_id,
+                            mbid
+                        )
+                        
+                        # Update release group mbid
+                        rg_mbid = mb_detail.get("release-group", {}).get("id")
+                        if rg_mbid:
+                            async with self.pool.acquire() as conn:
+                                await conn.execute(
+                                    "UPDATE releases SET release_group_mbid = $1 WHERE release_id = $2",
+                                    rg_mbid,
+                                    final_id
+                                )
+                        
+                        print(f"✅ UPC exact match: '{release_name}' → MBID {mbid}")
+                        return mbid
+        
+        # PRIORITY 2: Search by name and artist
         search_results = await self.mb.search_releases(
             release_name,
             artist=artist_name,
@@ -284,6 +399,16 @@ class MusicBrainzMatcher:
                                     final_id
                                 )
                         
+                        # Fill missing UPC
+                        mb_barcode = mb_detail.get("barcode")
+                        if not upc and mb_barcode:
+                            async with self.pool.acquire() as conn:
+                                await conn.execute(
+                                    "UPDATE releases SET upc = $1 WHERE release_id = $2",
+                                    mb_barcode,
+                                    release_id
+                                )
+                        
                         print(f"🟢 Release '{release_name}' → MBID {mbid} (Spotify match)")
                         return mbid
         
@@ -319,6 +444,16 @@ class MusicBrainzMatcher:
                         await conn.execute(
                             "UPDATE releases SET spotify_id = $1 WHERE release_id = $2",
                             mb_spotify_id,
+                            release_id
+                        )
+                
+                # fill missing UPC
+                mb_barcode = mb_detail.get("barcode")
+                if not upc and mb_barcode:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE releases SET upc = $1 WHERE release_id = $2",
+                            mb_barcode,
                             release_id
                         )
                 
@@ -373,22 +508,38 @@ class MusicBrainzMatcher:
         track_id: int,
         track_name: str,
         track_number: Optional[int],
+        mb_tracks: List[Dict],
         release_tracks: List[Dict],
-        min_similarity: float = 0.55
+        min_similarity: float = 0.55,
+        isrc: Optional[str] = None
     ) -> Optional[str]:
         """
-        Match track to MusicBrainz recording.
+        Match track to MusicBrainz recording with ISRC priority.
         
         Args:
             track_id: Local track ID
             track_name: Track name
             track_number: Track position on release
+            mb_tracks: Tracks from MusicBrainz (with ISRC data)
             release_tracks: List of tracks from MB release
             min_similarity: Minimum similarity score
+            isrc: Track ISRC if available
         
         Returns:
             Recording MBID if matched
         """
+        # PRIORITY 1: Exact ISRC match
+        if isrc:
+            for mb_rec in mb_tracks:
+                if isrc in mb_rec.get('isrc-list', []):
+                    print(f"✅ Exact ISRC match found for: {track_name}")
+                    await self.pool.execute(
+                        "UPDATE tracks SET recording_mbid = $1, on_mb = TRUE WHERE track_id = $2",
+                        mb_rec['id'], track_id
+                    )
+                    return mb_rec['id']
+        
+        # PRIORITY 2: Position + name matching
         if not track_number:
             return None
         
@@ -424,9 +575,19 @@ class MusicBrainzMatcher:
         
         if best_candidate and best_score >= min_similarity:
             async with self.pool.acquire() as conn:
+                mb_rec = next((t for t in mb_tracks if t['id'] == best_candidate['recording']), None)
+                found_isrc = mb_rec.get('isrc-list', [None])[0] if mb_rec else None
+                
                 await conn.execute(
-                    "UPDATE tracks SET recording_mbid = $1, on_mb = TRUE WHERE track_id = $2",
+                    """
+                    UPDATE tracks 
+                    SET recording_mbid = $1, 
+                        isrc = COALESCE(isrc, $2),
+                        on_mb = TRUE
+                    WHERE track_id = $3
+                    """,
                     best_candidate["recording_mbid"],
+                    found_isrc,
                     track_id
                 )
             
@@ -436,44 +597,46 @@ class MusicBrainzMatcher:
         return None
     
     async def process_artists(self) -> None:
-        """Process all artists missing MBIDs."""
+        """Process all artists missing MBIDs with ISNI priority."""
         artists = await self.pool.fetch(
             """
-            SELECT artist_id, artist_name, spotify_id 
+            SELECT artist_id, artist_name, spotify_id, isni
             FROM artists 
             WHERE artist_mbid IS NULL AND on_mb IS NULL
             """
         )
         
-        print(f"\n🎨 Processing {len(artists)} artists...")
+        print(f"\n🎨 Processing {len(artists)} artists (with ISNI priority)...")
         
         for artist in tqdm(artists, desc="Artists"):
             await self.match_artist(
                 artist["artist_id"],
                 artist["artist_name"],
-                artist.get("spotify_id")
+                artist.get("spotify_id"),
+                artist.get("isni")
             )
             await asyncio.sleep(0.5)
     
     async def process_releases(self) -> None:
-        """Process all releases missing MBIDs."""
+        """Process all releases missing MBIDs with UPC priority."""
         releases = await self.pool.fetch(
             """
-            SELECT r.release_id, r.release_name, r.spotify_id, a.artist_name
+            SELECT r.release_id, r.release_name, r.spotify_id, r.upc, a.artist_name
             FROM releases r
             JOIN artists a ON r.primary_artist_id = a.artist_id
             WHERE r.release_mbid IS NULL AND r.on_mb IS NULL
             """
         )
         
-        print(f"\n💿 Processing {len(releases)} releases...")
+        print(f"\n💿 Processing {len(releases)} releases (with UPC priority)...")
         
         for release in tqdm(releases, desc="Releases"):
             mbid = await self.match_release(
                 release["release_id"],
                 release["release_name"],
                 release["artist_name"],
-                release.get("spotify_id")
+                release.get("spotify_id"),
+                release.get("upc")
             )
             
             # Process tracks for this release
@@ -496,7 +659,7 @@ class MusicBrainzMatcher:
         """
         tracks = await self.pool.fetch(
             """
-            SELECT track_id, track_name, track_number 
+            SELECT track_id, track_name, track_number, isrc
             FROM tracks 
             WHERE release_id = $1 AND recording_mbid IS NULL
             """,
@@ -508,12 +671,27 @@ class MusicBrainzMatcher:
         
         release_tracks = await self.fetch_release_tracks(release_mbid)
         
+        # Fetch ISRC data for recordings if we have ISRCs to match
+        mb_tracks = []
+        # fetch isrc data for tracks missing it
+        if any(not t.get("isrc") for t in tracks):
+            for rt in release_tracks:
+                # fill mb_tracks list with recording details
+                rec_data = await self.mb.get_recording(
+                    rt["recording_mbid"],
+                    includes=["isrcs"]
+                )
+                if rec_data:
+                    mb_tracks.append(rec_data)
+        
         for track in tracks:
             await self.match_track(
                 track["track_id"],
                 track["track_name"],
                 track.get("track_number"),
-                release_tracks
+                mb_tracks,
+                release_tracks,
+                isrc=track.get("isrc")
             )
             await asyncio.sleep(0.2)
     
@@ -521,7 +699,7 @@ class MusicBrainzMatcher:
         """Process tracks whose releases now have MBIDs but tracks don't."""
         tracks = await self.pool.fetch(
             """
-            SELECT t.track_id, t.track_name, t.track_number, r.release_mbid
+            SELECT t.track_id, t.track_name, t.track_number, r.release_mbid, t.isrc
             FROM tracks t
             JOIN releases r ON t.release_id = r.release_id
             WHERE t.recording_mbid IS NULL
@@ -533,7 +711,7 @@ class MusicBrainzMatcher:
         if not tracks:
             return
         
-        print(f"\n🎵 Processing {len(tracks)} orphan tracks...")
+        print(f"\n🎵 Processing {len(tracks)} orphan tracks (with ISRC priority)...")
         
         # group by release to avoid fetching same release multiple times
         from collections import defaultdict
@@ -546,20 +724,34 @@ class MusicBrainzMatcher:
             tracks_by_release.items(),
             desc="Orphan tracks"
         ):
-            mb_tracks = await self.fetch_release_tracks(release_mbid)
+            mb_release_tracks = await self.fetch_release_tracks(release_mbid)
+            
+            # Fetch ISRC data if needed
+            mb_tracks = []
+            has_isrcs = any(t.get("isrc") for t in release_tracks)
+            if has_isrcs:
+                for rt in mb_release_tracks:
+                    rec_data = await self.mb.get_recording(
+                        rt["recording_mbid"],
+                        includes=["isrcs"]
+                    )
+                    if rec_data:
+                        mb_tracks.append(rec_data)
             
             for track in release_tracks:
                 await self.match_track(
                     track["track_id"],
                     track["track_name"],
                     track.get("track_number"),
-                    mb_tracks
+                    mb_tracks,
+                    mb_release_tracks,
+                    isrc=track.get("isrc")
                 )
                 await asyncio.sleep(0.2)
     
     async def run(self) -> None:
         """Run complete MusicBrainz matching process."""
-        print("🎵 Starting MusicBrainz matching process...")
+        print("🎵 Starting MusicBrainz matching process (with UPC/ISNI/ISRC priority)...")
         
         await self.process_artists()
         await self.process_releases()
