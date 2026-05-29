@@ -437,7 +437,7 @@ class SpotifyMatcher:
         """Process all tracks missing Spotify IDs, with ISRC priority."""
         tracks = await self.pool.fetch(
             """
-            SELECT t.track_id, t.track_name, t.isrc, r.spotify_id AS release_spotify_id
+            SELECT t.track_id, t.track_name, t.isrc, t.duration_ms, r.spotify_id AS release_spotify_id
             FROM tracks t
             JOIN releases r ON t.release_id = r.release_id
             WHERE t.spotify_id IS NULL 
@@ -509,6 +509,14 @@ class SpotifyMatcher:
             
             # try each match
             for candidate in matches:
+                # validate by track duration
+                sp_duration = candidate["data"].get("duration_ms")
+                db_duration = track.get("duration_ms")
+                
+                if db_duration and sp_duration:
+                    if abs(sp_duration - db_duration) > 3000:
+                        continue
+                    
                 # validate artists if available
                 sp_artists = set(candidate["data"].get("artists", []))
                 
