@@ -34,6 +34,7 @@ class MetadataParquetExporter:
         
         self.lastfm_api_key = lastfm_api_key
         self.musicbrainz_rate_limit = 1.0  # MusicBrainz requires 1 req/sec
+        self.lastfm_rate_limit = 0.2  # Last.fm allows ~5 req/sec
         
         # Storage for collected data
         self.musicbrainz_data = []
@@ -103,25 +104,34 @@ class MetadataParquetExporter:
             print(f"Error fetching recording {mbid}: {e}")
             return None
     
-    async def fetch_lastfm_artist(self, session: aiohttp.ClientSession, artist_name: str) -> Optional[Dict]:
+    async def fetch_lastfm_artist(self, session: aiohttp.ClientSession, artist_name: str, mbid: Optional[str] = None) -> Optional[Dict]:
         """Fetch artist info from Last.fm."""
         if not self.lastfm_api_key:
             return None
         
         params = {
             'method': 'artist.getinfo',
-            'artist': artist_name,
             'api_key': self.lastfm_api_key,
             'format': 'json'
         }
+        
+        # Prefer MBID lookup when available (more accurate)
+        if mbid:
+            params['mbid'] = mbid
+        else:
+            params['artist'] = artist_name
         
         try:
             async with session.get(self.lastfm_base, params=params) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
                 
+                # Check if Last.fm found the artist
+                if 'error' in data:
+                    return None
+                
                 return {
-                    'entity_id': artist_name,
+                    'entity_id': mbid or artist_name,
                     'entity_type': 'artist',
                     'raw_payload': json.dumps(data),
                     'ingested_at': datetime.now().isoformat()
@@ -183,6 +193,39 @@ class MetadataParquetExporter:
                     self.musicbrainz_data.append(data)
                 await asyncio.sleep(self.musicbrainz_rate_limit)
     
+    def extract_artist_names_from_musicbrainz(self) -> List[Dict[str, str]]:
+        """Extract artist names and MBIDs from MusicBrainz data for Last.fm lookup."""
+        artists = []
+        
+        for record in self.musicbrainz_data:
+            if record['entity_type'] == 'artist':
+                payload = json.loads(record['raw_payload'])
+                artists.append({
+                    'name': payload.get('name', ''),
+                    'mbid': record['mbid']
+                })
+        
+        return artists
+    
+    async def fetch_lastfm_metadata(self, artists: List[Dict[str, str]]):
+        """Fetch Last.fm metadata for artists."""
+        if not self.lastfm_api_key:
+            print("\n⚠️  No Last.fm API key provided, skipping Last.fm enrichment")
+            return
+        
+        print(f"\n📡 Fetching Last.fm metadata for {len(artists)} artists...")
+        
+        async with aiohttp.ClientSession() as session:
+            for artist in tqdm(artists, desc="Last.fm"):
+                data = await self.fetch_lastfm_artist(
+                    session, 
+                    artist['name'], 
+                    artist.get('mbid')
+                )
+                if data:
+                    self.lastfm_data.append(data)
+                await asyncio.sleep(self.lastfm_rate_limit)
+    
     def extract_wikidata_ids_from_musicbrainz(self) -> Set[tuple]:
         """Extract Wikidata IDs from MusicBrainz genre tags."""
         wikidata_mappings = set()
@@ -190,19 +233,26 @@ class MetadataParquetExporter:
         for record in self.musicbrainz_data:
             payload = json.loads(record['raw_payload'])
             genres = payload.get('genres', [])
+            tags = payload.get('tags', [])
             
+            # Extract from genres
             for genre in genres:
-                # MusicBrainz sometimes includes Wikidata IDs in genre metadata
                 wikidata_id = genre.get('wikidata-id')
                 if wikidata_id:
                     wikidata_mappings.add((wikidata_id, genre.get('name', '')))
+            
+            # Also check tags (sometimes genres are in tags)
+            for tag in tags:
+                wikidata_id = tag.get('wikidata-id')
+                if wikidata_id:
+                    wikidata_mappings.add((wikidata_id, tag.get('name', '')))
         
         return wikidata_mappings
     
     async def fetch_wikidata_metadata(self, wikidata_mappings: Set[tuple]):
         """Fetch Wikidata genre hierarchy."""
         if not wikidata_mappings:
-            print("\n⚠️ No Wikidata IDs found in MusicBrainz data")
+            print("\n⚠️  No Wikidata IDs found in MusicBrainz data")
             return
         
         print(f"\n📡 Fetching Wikidata metadata for {len(wikidata_mappings)} genres...")
@@ -231,6 +281,8 @@ class MetadataParquetExporter:
             output_file = self.output_dir / f'bronze_lastfm_{timestamp}.parquet'
             df.to_parquet(output_file, index=False, compression='snappy')
             print(f"✅ Saved Last.fm: {output_file} ({len(self.lastfm_data)} records)")
+        else:
+            print("ℹ️  No Last.fm data to save (API key not provided or no data fetched)")
         
         # Save Wikidata data
         if self.wikidata_data:
@@ -251,6 +303,12 @@ class MetadataParquetExporter:
         
         # Fetch MusicBrainz metadata
         await self.fetch_musicbrainz_metadata(mbids)
+        
+        # Extract artist names for Last.fm lookup
+        artists = self.extract_artist_names_from_musicbrainz()
+        
+        # Fetch Last.fm metadata
+        await self.fetch_lastfm_metadata(artists)
         
         # Extract Wikidata IDs from MusicBrainz genres
         wikidata_mappings = self.extract_wikidata_ids_from_musicbrainz()
@@ -277,8 +335,8 @@ def main():
     MBIDS_FILE = "./parquet_export/mbids_to_fetch_20260528_123456.json"
     OUTPUT_DIR = "./parquet_export"
     
-    # Optional: Last.fm API key for enrichment
-    LASTFM_API_KEY = None  # Set this if you want Last.fm data
+    # Last.fm API key for enrichment (get from https://www.last.fm/api/account/create)
+    LASTFM_API_KEY = "your_lastfm_api_key_here"  # Set this to enable Last.fm data
     
     # Create exporter
     exporter = MetadataParquetExporter(
