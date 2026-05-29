@@ -4,6 +4,7 @@ This script runs LOCALLY after you've exported listens.
 """
 import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set
@@ -11,6 +12,10 @@ from typing import List, Dict, Optional, Set
 import aiohttp
 import pandas as pd
 from tqdm import tqdm
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class MetadataParquetExporter:
@@ -22,7 +27,7 @@ class MetadataParquetExporter:
         
         Args:
             output_dir: Directory to save Parquet files
-            lastfm_api_key: Last.fm API key (optional)
+            lastfm_api_key: Last.fm API key (if not provided, loads from .env)
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -32,7 +37,9 @@ class MetadataParquetExporter:
         self.lastfm_base = "https://ws.audioscrobbler.com/2.0/"
         self.wikidata_base = "https://www.wikidata.org/w/api.php"
         
-        self.lastfm_api_key = lastfm_api_key
+        # Load Last.fm API key from parameter or environment
+        self.lastfm_api_key = lastfm_api_key or os.getenv('LASTFM_API_KEY')
+        
         self.musicbrainz_rate_limit = 1.0  # MusicBrainz requires 1 req/sec
         self.lastfm_rate_limit = 0.2  # Last.fm allows ~5 req/sec
         
@@ -211,6 +218,7 @@ class MetadataParquetExporter:
         """Fetch Last.fm metadata for artists."""
         if not self.lastfm_api_key:
             print("\n⚠️  No Last.fm API key provided, skipping Last.fm enrichment")
+            print("   Set LASTFM_API_KEY in .env file to enable Last.fm data")
             return
         
         print(f"\n📡 Fetching Last.fm metadata for {len(artists)} artists...")
@@ -331,18 +339,24 @@ def main():
     """
     Example usage.
     """
-    # Paths from previous export
-    MBIDS_FILE = "./parquet_export/mbids_to_fetch_20260528_123456.json"
-    OUTPUT_DIR = "./parquet_export"
+    # Load configuration from environment variables
+    OUTPUT_DIR = os.getenv('OUTPUT_DIR', './parquet_export')
     
-    # Last.fm API key for enrichment (get from https://www.last.fm/api/account/create)
-    LASTFM_API_KEY = "your_lastfm_api_key_here"  # Set this to enable Last.fm data
+    # Find the most recent mbids_to_fetch file
+    output_path = Path(OUTPUT_DIR)
+    mbids_files = sorted(output_path.glob('mbids_to_fetch_*.json'))
     
-    # Create exporter
-    exporter = MetadataParquetExporter(
-        output_dir=OUTPUT_DIR,
-        lastfm_api_key=LASTFM_API_KEY
-    )
+    if not mbids_files:
+        print("❌ No mbids_to_fetch_*.json file found in output directory")
+        print(f"   Looking in: {output_path.absolute()}")
+        print("   Run export_to_parquet.py first to generate MBID list")
+        return
+    
+    MBIDS_FILE = str(mbids_files[-1])  # Use most recent file
+    print(f"Using MBIDs file: {MBIDS_FILE}")
+    
+    # Create exporter (Last.fm API key loaded from .env)
+    exporter = MetadataParquetExporter(output_dir=OUTPUT_DIR)
     
     # Run export
     asyncio.run(exporter.export(MBIDS_FILE))

@@ -4,6 +4,7 @@ This script runs LOCALLY and saves bronze-layer Parquet files.
 """
 import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -11,20 +12,30 @@ from typing import Optional, List, Dict
 import aiohttp
 import pandas as pd
 from tqdm import tqdm
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class ListenBrainzParquetExporter:
     """Export ListenBrainz data to Parquet files."""
     
-    def __init__(self, username: str, output_dir: str = "./output"):
+    def __init__(self, username: str = None, output_dir: str = "./output"):
         """
         Initialize exporter.
         
         Args:
-            username: ListenBrainz username
+            username: ListenBrainz username (if not provided, loads from .env)
             output_dir: Directory to save Parquet files
         """
-        self.username = username
+        self.username = username or os.getenv('LISTENBRAINZ_USERNAME')
+        if not self.username:
+            raise ValueError(
+                "ListenBrainz username not provided. "
+                "Either pass username parameter or set LISTENBRAINZ_USERNAME in .env file"
+            )
+        
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -141,7 +152,6 @@ class ListenBrainzParquetExporter:
         artist_mbids = set()
         release_mbids = set()
         recording_mbids = set()
-        genres_from_musicbrainz = set()
         
         for listen in listens:
             metadata = listen.get('track_metadata', {})
@@ -207,7 +217,7 @@ class ListenBrainzParquetExporter:
         print(f"   MBIDs list: {mbids_file}")
         print(f"\n📦 Next steps:")
         print(f"   1. Upload {Path(bronze_file).name} to Databricks (via Volumes or workspace)")
-        print(f"   2. Use {Path(mbids_file).name} to fetch MusicBrainz/Last.fm/Wikidata metadata")
+        print(f"   2. Run: python fetch_metadata_to_parquet.py")
         print(f"   3. Run bronze → silver transformation in Databricks")
 
 
@@ -215,14 +225,11 @@ def main():
     """
     Example usage.
     """
-    # TODO: Replace with your ListenBrainz username
-    USERNAME = "your_username_here"
+    # Username and output directory loaded from .env or defaults
+    OUTPUT_DIR = os.getenv('OUTPUT_DIR', './parquet_export')
     
-    # Optional: specify output directory
-    OUTPUT_DIR = "./parquet_export"
-    
-    # Create exporter
-    exporter = ListenBrainzParquetExporter(username=USERNAME, output_dir=OUTPUT_DIR)
+    # Create exporter (username loaded from .env)
+    exporter = ListenBrainzParquetExporter(output_dir=OUTPUT_DIR)
     
     # Run export
     asyncio.run(exporter.export())
