@@ -232,13 +232,13 @@ class MusicBrainzClient:
     async def get_artist_by_id(
         self,
         mbid: str,
-        inlcudes: Optional[List[str]] = None
+        includes: Optional[List[str]] = None
     ) -> Optional[Dict]:
         """
         Get artist details by mbid to fetch isnis and aliases.
         """
         includes = includes or ['isnis', 'aliases']
-        result = await self._self_call(
+        result = await self._safe_call(
             musicbrainzngs.get_artist_by_id,
             mbid,
             includes=includes
@@ -263,7 +263,7 @@ class MusicBrainzClient:
         )
         
         if result and "release" in result:
-            return result["result"]
+            return result["release"]
         
         return None
     

@@ -31,7 +31,7 @@ Commands:
     fetch-metadata      Fetch metadata from MusicBrainz and Spotify
     validate-musicbrainz Validate MusicBrainz matches
     validate-spotify    Validate Spotify matches
-    
+    export-parquet      Export local data to Parquet files for Databricks <-- ADD THIS
     
 Examples:
     python cli.py import
@@ -80,8 +80,26 @@ async def run_validate_spotify():
     """Validate Spotify matches."""
     from scripts.validate_spotify import main
     await main()
-    
 
+async def run_export_parquet():
+    """Export local data to Parquet for Databricks migration."""
+    import sys
+    from scripts.export_with_existing_clients import DataExporter
+    
+    # initialize defaults
+    max_ts = None
+    min_ts = None
+    sample_only = "--sample" in sys.argv or "--smoke" in sys.argv
+    
+    for arg in sys.argv:
+        if arg.startswith("--max_ts="):
+            max_ts = int(arg.split("=")[1])
+        if arg.startswith("--min_ts"):
+            min_ts = int(arg.split("=")[1])
+    
+    exporter = DataExporter()
+    await exporter.export_all(max_ts=max_ts, min_ts=min_ts, sample_only=sample_only)
+    
 def main():
     """Main CLI entry point."""
     if len(sys.argv) < 2:
@@ -102,6 +120,8 @@ def main():
         'validate-mb': run_validate_musicbrainz,
         'validate-spotify': run_validate_spotify,
         'validate-sp': run_validate_spotify,
+        'export-parquet': run_export_parquet,
+        'export': run_export_parquet
     }
     
     if command in ['--help', '-h', 'help']:
